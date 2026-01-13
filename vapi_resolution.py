@@ -192,13 +192,16 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
         st.warning("No data available for Sankey visualization")
         return
 
+    # Calculate resolved vs unresolved
     resolved_count = sum(1 for f in all_files if f.get('resolution_achieved') is True)
     unresolved_count = sum(1 for f in all_files if f.get('resolution_achieved') is False)
     unknown_count = total - resolved_count - unresolved_count
 
     resolved_pct = (resolved_count / total * 100) if total else 0
     unresolved_pct = (unresolved_count / total * 100) if total else 0
+    unknown_pct = (unknown_count / total * 100) if total else 0
 
+    # Calculate resolution types from resolved calls
     resolved_files = [f for f in all_files if f.get('resolution_achieved') is True]
     type_counts = defaultdict(int)
     type_files = defaultdict(list)
@@ -207,26 +210,60 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
         type_counts[res_type] += 1
         type_files[res_type].append(f)
 
+    # Calculate resolution types from UNRESOLVED calls (for expansion)
+    unresolved_files = [f for f in all_files if f.get('resolution_achieved') is False]
+    unresolved_type_counts = defaultdict(int)
+    unresolved_type_files = defaultdict(list)
+    for f in unresolved_files:
+        res_type = f.get('resolution_type', 'no_resolution_type')
+        unresolved_type_counts[res_type] += 1
+        unresolved_type_files[res_type].append(f)
+
+    # Calculate transfer breakdown
     transfer_files = [f for f in all_files if f.get('resolution_type') in ['transfer', 'transfer_attempted']]
     transfer_success = sum(1 for f in transfer_files if f.get('transfer_success') is True)
     transfer_failed = sum(1 for f in transfer_files if f.get('transfer_success') is False)
+    transfer_unknown = len(transfer_files) - transfer_success - transfer_failed
 
+    # Track source files per link
     link_sources = {}
     link_index = 0
 
-    # Controls
+    # ===== Diagram Controls =====
     st.markdown("### ⚙️ Diagram Controls")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        show_resolution_types = st.checkbox("Show Resolution Types", value=True)
-    with col2:
-        show_transfer_outcomes = st.checkbox("Show Transfer Outcomes", value=True)
-    with col3:
-        expand_unresolved = st.checkbox("Expand Unresolved", value=False)
+
+    # Row 1: Primary splits
+    row1_cols = st.columns(4)
+    with row1_cols[0]:
+        show_resolution_types = st.checkbox("Show Resolution Types", value=True, key="show_res_types",
+                                           help="Show resolution type breakdown for resolved calls")
+    with row1_cols[1]:
+        split_by_caller_type = st.checkbox("Split by Caller Type", value=False, key="split_caller_type",
+                                          help="Show caller type breakdown after resolved/unresolved")
+    with row1_cols[2]:
+        expand_unresolved = st.checkbox("Expand Unresolved", value=False, key="expand_unresolved",
+                                       help="Show resolution types breakdown for unresolved calls")
+    with row1_cols[3]:
+        st.write("")
+
+    # Row 2: Transfer-related options
+    row2_cols = st.columns(4)
+    with row2_cols[0]:
+        show_transfer_outcomes = st.checkbox("Show Transfer Outcomes", value=True, key="show_transfer_outcomes",
+                                            help="Toggle visibility of transfer success/failure breakdown")
+    with row2_cols[1]:
+        show_transfer_destinations = st.checkbox("Show Transfer Destinations", value=False, key="show_transfer_destinations",
+                                                help="Expand transfer outcomes into their destinations")
+    with row2_cols[2]:
+        show_secondary_actions = st.checkbox("Show Secondary Actions", value=False, key="show_secondary_actions",
+                                            help="Show secondary actions taken after transfers",
+                                            disabled=not show_transfer_outcomes)
+    with row2_cols[3]:
+        st.write("")
 
     st.markdown("---")
 
-    # Build Sankey
+    # ===== Build Sankey diagram =====
     nodes = [f"All Calls ({total})"]
     node_colors = ["#667eea"]
 
@@ -238,7 +275,7 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
 
     has_unknown = unknown_count > 0
     if has_unknown:
-        nodes.append(f"Unknown ({unknown_count})")
+        nodes.append(f"Unknown ({unknown_count}, {unknown_pct:.1f}%)")
         node_colors.append("#94a3b8")
 
     sources = []
@@ -278,7 +315,63 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
         link_labels.append(f"All Calls → Unknown: {unknown_count}")
         link_index += 1
 
-    # Resolution types
+    # ===== CALLER TYPE SPLIT =====
+    if split_by_caller_type:
+        resolved_by_caller = defaultdict(list)
+        unresolved_by_caller = defaultdict(list)
+
+        for f in all_files:
+            ct = f.get('caller_type', 'unknown')
+            if f.get('resolution_achieved') is True:
+                resolved_by_caller[ct].append(f)
+            elif f.get('resolution_achieved') is False:
+                unresolved_by_caller[ct].append(f)
+
+        caller_type_colors = [
+            "#06b6d4", "#8b5cf6", "#f59e0b", "#10b981", "#f43f5e",
+            "#6366f1", "#84cc16", "#ec4899", "#14b8a6", "#a855f7"
+        ]
+
+        resolved_node_idx = 1
+        unresolved_node_idx = 2
+
+        if resolved_by_caller:
+            sorted_resolved_callers = sorted(resolved_by_caller.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (ct, files) in enumerate(sorted_resolved_callers):
+                pct = (len(files) / resolved_count * 100) if resolved_count else 0
+                node_label = f"{ct.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                ct_node_idx = len(nodes)
+                nodes.append(node_label)
+                color_idx = idx % len(caller_type_colors)
+                node_colors.append(caller_type_colors[color_idx])
+
+                sources.append(resolved_node_idx)
+                targets.append(ct_node_idx)
+                values.append(len(files))
+                link_colors.append(f"rgba({int(caller_type_colors[color_idx][1:3], 16)}, {int(caller_type_colors[color_idx][3:5], 16)}, {int(caller_type_colors[color_idx][5:7], 16)}, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Resolved → {ct}: {len(files)}")
+                link_index += 1
+
+        if unresolved_by_caller:
+            sorted_unresolved_callers = sorted(unresolved_by_caller.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (ct, files) in enumerate(sorted_unresolved_callers):
+                pct = (len(files) / unresolved_count * 100) if unresolved_count else 0
+                node_label = f"{ct.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                ct_node_idx = len(nodes)
+                nodes.append(node_label)
+                color_idx = idx % len(caller_type_colors)
+                node_colors.append(caller_type_colors[color_idx])
+
+                sources.append(unresolved_node_idx)
+                targets.append(ct_node_idx)
+                values.append(len(files))
+                link_colors.append(f"rgba({int(caller_type_colors[color_idx][1:3], 16)}, {int(caller_type_colors[color_idx][3:5], 16)}, {int(caller_type_colors[color_idx][5:7], 16)}, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Unresolved → {ct}: {len(files)}")
+                link_index += 1
+
+    # Add resolution type nodes (from resolved calls only)
     resolved_node_idx = 1
     type_node_start = len(nodes)
     sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
@@ -313,23 +406,64 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
             link_labels.append(f"Resolved → {res_type}: {count}")
             link_index += 1
 
-    # Transfer outcomes
-    transfer_total = len(transfer_files)
-    if show_resolution_types and show_transfer_outcomes and transfer_files:
-        success_idx = None
-        failed_idx = None
+    # ===== UNRESOLVED EXPANSION =====
+    unresolved_node_idx = 2
+    if expand_unresolved and unresolved_count > 0:
+        unresolved_type_node_start = len(nodes)
+        sorted_unresolved_types = sorted(unresolved_type_counts.items(), key=lambda x: x[1], reverse=True)
 
+        unresolved_type_colors = [
+            "#dc2626", "#ea580c", "#d97706", "#ca8a04", "#b91c1c",
+            "#c2410c", "#b45309", "#a16207", "#991b1b", "#9a3412"
+        ]
+
+        for idx, (res_type, count) in enumerate(sorted_unresolved_types):
+            pct = (count / unresolved_count * 100) if unresolved_count else 0
+            node_label = f"{res_type.replace('_', ' ').title()} ({count}, {pct:.1f}%)"
+            nodes.append(node_label)
+
+            color_idx = idx % len(unresolved_type_colors)
+            node_colors.append(unresolved_type_colors[color_idx])
+
+            unres_type_node_idx = unresolved_type_node_start + idx
+
+            sources.append(unresolved_node_idx)
+            targets.append(unres_type_node_idx)
+            values.append(count)
+            link_colors.append(f"rgba({int(unresolved_type_colors[color_idx][1:3], 16)}, {int(unresolved_type_colors[color_idx][3:5], 16)}, {int(unresolved_type_colors[color_idx][5:7], 16)}, 0.4)")
+            link_sources[link_index] = unresolved_type_files[res_type]
+            link_labels.append(f"Unresolved → {res_type}: {count}")
+            link_index += 1
+
+    # Add transfer outcome nodes
+    transfer_total = len(transfer_files)
+    success_pct = (transfer_success / transfer_total * 100) if transfer_total else 0
+    failed_pct = (transfer_failed / transfer_total * 100) if transfer_total else 0
+    unknown_transfer_pct = (transfer_unknown / transfer_total * 100) if transfer_total else 0
+
+    transfer_success_files = [f for f in transfer_files if f.get('transfer_success') is True]
+    transfer_failed_files = [f for f in transfer_files if f.get('transfer_success') is False]
+    transfer_unknown_files = [f for f in transfer_files if f.get('transfer_success') is None]
+
+    success_idx = None
+    failed_idx = None
+    unknown_idx = None
+
+    if show_resolution_types and show_transfer_outcomes and transfer_files and (transfer_success > 0 or transfer_failed > 0 or transfer_unknown > 0):
         if transfer_success > 0:
             success_idx = len(nodes)
-            success_pct = (transfer_success / transfer_total * 100) if transfer_total else 0
             nodes.append(f"Transfer Connected ({transfer_success}, {success_pct:.1f}%)")
             node_colors.append("#22c55e")
 
         if transfer_failed > 0:
             failed_idx = len(nodes)
-            failed_pct = (transfer_failed / transfer_total * 100) if transfer_total else 0
             nodes.append(f"Transfer Failed ({transfer_failed}, {failed_pct:.1f}%)")
             node_colors.append("#ef4444")
+
+        if transfer_unknown > 0:
+            unknown_idx = len(nodes)
+            nodes.append(f"Transfer Unknown ({transfer_unknown}, {unknown_transfer_pct:.1f}%)")
+            node_colors.append("#94a3b8")
 
         for res_type in ['transfer', 'transfer_attempted']:
             if res_type not in type_counts:
@@ -347,6 +481,7 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
             res_type_files = type_files[res_type]
             success_files = [f for f in res_type_files if f.get('transfer_success') is True]
             failed_files_list = [f for f in res_type_files if f.get('transfer_success') is False]
+            unknown_files = [f for f in res_type_files if f.get('transfer_success') is None]
 
             if success_files and success_idx is not None:
                 sources.append(type_idx)
@@ -366,7 +501,124 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
                 link_labels.append(f"{res_type} → Failed: {len(failed_files_list)}")
                 link_index += 1
 
-    # Create figure
+            if unknown_files and unknown_idx is not None:
+                sources.append(type_idx)
+                targets.append(unknown_idx)
+                values.append(len(unknown_files))
+                link_colors.append("rgba(148, 163, 184, 0.4)")
+                link_sources[link_index] = unknown_files
+                link_labels.append(f"{res_type} → Unknown: {len(unknown_files)}")
+                link_index += 1
+
+    # ===== TRANSFER DESTINATION EXPANSION =====
+    if show_transfer_destinations and show_resolution_types and show_transfer_outcomes and transfer_files:
+        success_by_dest = defaultdict(list)
+        failed_by_dest = defaultdict(list)
+
+        for f in transfer_files:
+            dest = f.get('transfer_destination') or 'Unknown Destination'
+            ts = f.get('transfer_success')
+            if ts is True:
+                success_by_dest[dest].append(f)
+            elif ts is False:
+                failed_by_dest[dest].append(f)
+
+        success_dest_colors = ["#16a34a", "#15803d", "#166534", "#14532d", "#22c55e"]
+        failed_dest_colors = ["#dc2626", "#b91c1c", "#991b1b", "#7f1d1d", "#ef4444"]
+
+        if success_by_dest and success_idx is not None:
+            sorted_success_dests = sorted(success_by_dest.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (dest, files) in enumerate(sorted_success_dests):
+                pct = (len(files) / transfer_success * 100) if transfer_success else 0
+                node_label = f"{dest.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                dest_node_idx = len(nodes)
+                nodes.append(node_label)
+                node_colors.append(success_dest_colors[idx % len(success_dest_colors)])
+
+                sources.append(success_idx)
+                targets.append(dest_node_idx)
+                values.append(len(files))
+                link_colors.append("rgba(22, 163, 74, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Connected → {dest}: {len(files)}")
+                link_index += 1
+
+        if failed_by_dest and failed_idx is not None:
+            sorted_failed_dests = sorted(failed_by_dest.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (dest, files) in enumerate(sorted_failed_dests):
+                pct = (len(files) / transfer_failed * 100) if transfer_failed else 0
+                node_label = f"{dest.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                dest_node_idx = len(nodes)
+                nodes.append(node_label)
+                node_colors.append(failed_dest_colors[idx % len(failed_dest_colors)])
+
+                sources.append(failed_idx)
+                targets.append(dest_node_idx)
+                values.append(len(files))
+                link_colors.append("rgba(220, 38, 38, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Failed → {dest}: {len(files)}")
+                link_index += 1
+
+    # ===== SECONDARY ACTION SPLIT =====
+    if show_secondary_actions and show_resolution_types and show_transfer_outcomes and transfer_files:
+        success_by_action = defaultdict(list)
+        failed_by_action = defaultdict(list)
+
+        for f in transfer_files:
+            sa = f.get('secondary_action') or 'no_secondary_action'
+            ts = f.get('transfer_success')
+            if ts is True:
+                success_by_action[sa].append(f)
+            elif ts is False:
+                failed_by_action[sa].append(f)
+
+        action_colors = [
+            "#0ea5e9", "#a855f7", "#f97316", "#22d3ee", "#e879f9",
+            "#fb923c", "#38bdf8", "#c084fc", "#fdba74"
+        ]
+
+        if success_by_action and success_idx is not None:
+            sorted_success_actions = sorted(success_by_action.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (action, files) in enumerate(sorted_success_actions):
+                if action == 'no_secondary_action':
+                    continue
+                pct = (len(files) / transfer_success * 100) if transfer_success else 0
+                node_label = f"{action.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                action_node_idx = len(nodes)
+                nodes.append(node_label)
+                color_idx = idx % len(action_colors)
+                node_colors.append(action_colors[color_idx])
+
+                sources.append(success_idx)
+                targets.append(action_node_idx)
+                values.append(len(files))
+                link_colors.append(f"rgba({int(action_colors[color_idx][1:3], 16)}, {int(action_colors[color_idx][3:5], 16)}, {int(action_colors[color_idx][5:7], 16)}, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Connected → {action}: {len(files)}")
+                link_index += 1
+
+        if failed_by_action and failed_idx is not None:
+            sorted_failed_actions = sorted(failed_by_action.items(), key=lambda x: len(x[1]), reverse=True)
+            for idx, (action, files) in enumerate(sorted_failed_actions):
+                if action == 'no_secondary_action':
+                    continue
+                pct = (len(files) / transfer_failed * 100) if transfer_failed else 0
+                node_label = f"{action.replace('_', ' ').title()} ({len(files)}, {pct:.1f}%)"
+                action_node_idx = len(nodes)
+                nodes.append(node_label)
+                color_idx = idx % len(action_colors)
+                node_colors.append(action_colors[color_idx])
+
+                sources.append(failed_idx)
+                targets.append(action_node_idx)
+                values.append(len(files))
+                link_colors.append(f"rgba({int(action_colors[color_idx][1:3], 16)}, {int(action_colors[color_idx][3:5], 16)}, {int(action_colors[color_idx][5:7], 16)}, 0.4)")
+                link_sources[link_index] = files
+                link_labels.append(f"Failed → {action}: {len(files)}")
+                link_index += 1
+
+    # Create Sankey diagram
     fig = go.Figure(data=[go.Sankey(
         node=dict(
             pad=20,
@@ -396,6 +648,7 @@ def render_resolution_flow(all_files: list, resolution_types: dict):
     )
 
     st.markdown("## 📊 Resolution Flow Analysis")
+    st.markdown("Interactive Sankey diagram showing call resolution breakdown")
     st.plotly_chart(fig, width="stretch")
 
     # Flow selector
@@ -586,6 +839,26 @@ def main():
         help="'successful' = at least one transfer connected, 'failed' = all transfers failed, 'no_transfer' = no transfer attempted."
     )
 
+    # Call Duration filter
+    st.sidebar.markdown("---")
+    st.sidebar.header("⏱️ Call Duration")
+
+    durations = [f.get('call_duration') for f in all_files if f.get('call_duration') is not None]
+    if durations:
+        min_dur = int(min(durations))
+        max_dur = int(max(durations)) + 1
+    else:
+        min_dur, max_dur = 0, 600
+
+    duration_range = st.sidebar.slider(
+        "Filter by duration (seconds)",
+        min_value=min_dur,
+        max_value=max_dur,
+        value=(min_dur, max_dur),
+        step=10,
+        help="Filter calls based on their duration in seconds."
+    )
+
     # Assistant ID filter
     all_assistant_ids = sorted(set(f.get('assistant_id', 'unknown') for f in all_files))
     st.sidebar.markdown("---")
@@ -635,6 +908,12 @@ def main():
             return "failed" in transfer_list
         return "no_transfer" in transfer_list
 
+    def matches_duration(f, dur_range):
+        dur = f.get('call_duration')
+        if dur is None:
+            return True  # Include calls without duration
+        return dur_range[0] <= dur <= dur_range[1]
+
     def matches_assistant_id(f, assistant_ids):
         return f.get('assistant_id', 'unknown') in assistant_ids
 
@@ -649,6 +928,7 @@ def main():
         and matches_caller_type(f, selected_caller_types)
         and matches_primary_intent(f, selected_intents)
         and matches_transfer_success(f, transfer_filter)
+        and matches_duration(f, duration_range)
         and matches_assistant_id(f, selected_assistant_ids)
         and matches_squad_id(f, selected_squad_ids)
     ]
@@ -755,7 +1035,6 @@ def main():
                 pct = (count / total_filtered * 100) if total_filtered else 0.0
                 dur = sum(f.get('call_duration', 0) or 0 for f in matching)
                 dur_pct = (dur / total_duration * 100) if total_duration else 0.0
-                # Truncate long IDs for display
                 display_id = assistant_id[:12] + '...' if len(assistant_id) > 15 else assistant_id
                 st.caption(f"✓ {display_id}: {count} ({pct:.1f}%, {dur_pct:.1f}% dur)")
 
@@ -768,7 +1047,6 @@ def main():
                 pct = (count / total_filtered * 100) if total_filtered else 0.0
                 dur = sum(f.get('call_duration', 0) or 0 for f in matching)
                 dur_pct = (dur / total_duration * 100) if total_duration else 0.0
-                # Truncate long IDs for display
                 display_id = squad_id[:12] + '...' if len(squad_id) > 15 else squad_id
                 st.caption(f"✓ {display_id}: {count} ({pct:.1f}%, {dur_pct:.1f}% dur)")
 
@@ -853,7 +1131,7 @@ def main():
     else:
         duration_str = f"{seconds}s"
 
-    file_col1, file_col2, file_col2b, file_col3, file_col4 = st.columns([3, 1.2, 1.4, 1, 1])
+    file_col1, file_col2, file_col2b, file_col2c, file_col3, file_col4 = st.columns([3, 1.2, 1.4, 1.2, 1, 1])
 
     with file_col1:
         selected_idx = st.selectbox("Select a call", range(len(file_options)), format_func=lambda i: file_options[i], label_visibility="visible")
@@ -863,6 +1141,9 @@ def main():
 
     with file_col2b:
         st.metric("Total Duration", duration_str)
+
+    with file_col2c:
+        st.metric("Position", f"{selected_idx + 1} / {len(display_files)}")
 
     with file_col3:
         if st.button("◀ Prev", use_container_width=True) and selected_idx > 0:
