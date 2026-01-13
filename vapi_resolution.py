@@ -2,8 +2,8 @@
 Streamlit UI for filtering and viewing VAPI call transcripts by resolution type
 
 Usage:
-    streamlit run vapi_resolution.py -- --file vapi_extracted_calls_analysed.json
-    streamlit run vapi_resolution.py  # defaults to vapi_extracted_calls_analysed.json
+    streamlit run vapi_resolution.py -- --file vapi_extracted_calls_analysed_v10.json
+    streamlit run vapi_resolution.py  # defaults to vapi_extracted_calls_analysed_v10.json
 """
 
 import streamlit as st
@@ -21,7 +21,7 @@ def parse_cli_args():
         parser.add_argument(
             '-f', '--file',
             type=str,
-            default='vapi_extracted_calls_analysed.json',
+            default='vapi_extracted_calls_analysed_v10.json',
             help='Path to the JSON file containing analyzed VAPI calls'
         )
         args, _ = parser.parse_known_args()
@@ -706,7 +706,7 @@ def main():
     # File selection
     st.sidebar.header("⚙️ Settings")
 
-    default_file = CLI_ARGS.file if CLI_ARGS else 'vapi_extracted_calls_analysed.json'
+    default_file = CLI_ARGS.file if CLI_ARGS else 'vapi_extracted_calls_analysed_v10.json'
     file_path = st.sidebar.text_input("Data File", value=default_file, help="Path to JSON file with analyzed VAPI calls")
 
     if not Path(file_path).exists():
